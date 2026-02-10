@@ -1,102 +1,77 @@
-const axios = require("axios");
+const Database = require("better-sqlite3");
+const path = require("path");
 
-// API URL
-const API_URL = "https://balance-bot-api.onrender.com";
+// === DATABASE SETUP ===
+const db = new Database(path.join(__dirname, "balance.db"));
+db.prepare(`
+  CREATE TABLE IF NOT EXISTS balances (
+    userID TEXT PRIMARY KEY,
+    balance INTEGER
+  )
+`).run();
 
-// 🔹 Get balance
-async function getBalance(userID) {
-  try {
-    const res = await axios.get(`${API_URL}/api/balance/${userID}`);
-    return res.data.balance || 100;
-  } catch {
-    return 100;
-  }
+// === BALANCE FUNCTIONS ===
+function getBalance(userID) {
+  const row = db.prepare("SELECT balance FROM balances WHERE userID=?").get(userID);
+  return row ? row.balance : 1000; // default balance
 }
 
-// 🔹 Win balance
-async function winGame(userID, amount) {
-  try {
-    const res = await axios.post(`${API_URL}/api/balance/win`, { userID, amount });
-    return res.data.success ? res.data.balance : null;
-  } catch {
-    return null;
-  }
+function setBalance(userID, balance) {
+  db.prepare(`
+    INSERT INTO balances (userID, balance)
+    VALUES (?, ?)
+    ON CONFLICT(userID) DO UPDATE SET balance=excluded.balance
+  `).run(userID, balance);
 }
 
-// 🔹 Lose balance
-async function loseGame(userID, amount) {
-  try {
-    const res = await axios.post(`${API_URL}/api/balance/lose`, { userID, amount });
-    return res.data.success ? res.data.balance : null;
-  } catch {
-    return null;
-  }
-}
-
+// === MODULE CONFIG ===
 module.exports = {
   config: {
     name: "bet",
-    version: "4.1",
+    version: "2.0",
     author: "MOHAMMAD AKASH",
-    countDown: 5,
     role: 0,
-    description: "Spin and win/loss money. Use '/spin <amount>' or '/spin top'.",
-    category: "economy",
-    guide: {
-      en: "{p}spin <amount>\n{p}spin top"
-    }
+    shortDescription: "Place a bet and win money",
+    category: "game",
+    guide: { en: "{p}bet <amount>" }
   },
 
-  onStart: async function ({ message, event, args }) {
-    const senderID = event.senderID;
-    const subCommand = args[0];
+  onStart: async function({ api, event, args }) {
+    const { senderID, threadID, messageID } = event;
 
-    // ✅ /spin top leaderboard (simple message, needs usersData if leaderboard API exists)
-    if (subCommand === "top") {
-      return message.reply("🏆 Spin leaderboard not implemented with API yet.");
-    }
+    if (!args[0])
+      return api.sendMessage("🎰 Usage: bet <amount>", threadID, messageID);
 
-    // ✅ /spin <amount>
-    const betAmount = parseInt(subCommand);
-    if (isNaN(betAmount) || betAmount <= 0) {
-      return message.reply("❌ Usage:\n/spin <amount>\n/spin top");
-    }
+    const betAmount = parseInt(args[0].replace(/\D/g, ''));
+    if (isNaN(betAmount) || betAmount <= 0)
+      return api.sendMessage("❌ Invalid amount!", threadID, messageID);
 
-    let balance = await getBalance(senderID);
-    if (balance < betAmount) {
-      return message.reply(`❌ Not enough money.\n💰 Your balance: ${balance} $`);
-    }
+    let balance = getBalance(senderID);
+    if (betAmount > balance)
+      return api.sendMessage(`❌ Not enough balance!\n🏦 Balance: ${balance}$`, threadID, messageID);
 
-    // Deduct bet first
-    balance = await loseGame(senderID, betAmount);
-
-    // Outcomes with multipliers (60% win chance)
+    // === CASINO OUTCOMES ===
     const outcomes = [
-      { text: "💥 You lost everything!", multiplier: 0 },   // loss
-      { text: "😞 You got back half.", multiplier: 0.5 },   // partial
-      { text: "🟡 You broke even.", multiplier: 1 },        // break even
+      { text: "💥 You lost everything!", multiplier: 0 },
+      { text: "😞 You got back half.", multiplier: 0.5 },
+      { text: "🟡 You broke even.", multiplier: 1 },
       { text: "🟢 You doubled your money!", multiplier: 2 },
       { text: "🔥 You tripled your bet!", multiplier: 3 },
-      { text: "🎉 JACKPOT! 10x reward!", multiplier: 10 }  // rare
+      { text: "🎉 JACKPOT! 10x reward!", multiplier: 10 }
     ];
 
-    // 60% normal, 40% rare logic for jackpot
-    let outcome;
-    const rand = Math.random();
-    if (rand < 0.6) {
-      outcome = outcomes[Math.floor(Math.random() * 4)]; // first 4 are common
-    } else {
-      outcome = outcomes[Math.floor(Math.random() * 2) + 4]; // last 2 are rare
-    }
+    const result = outcomes[Math.floor(Math.random() * outcomes.length)];
+    const reward = Math.floor(betAmount * result.multiplier);
+    balance = balance - betAmount + reward;
 
-    const reward = Math.floor(betAmount * outcome.multiplier);
-    const newBalance = reward > 0 ? await winGame(senderID, reward) : balance;
+    setBalance(senderID, balance);
 
-    return message.reply(
-`${outcome.text}
-🎰 You bet: ${betAmount} $
-💸 You won: ${reward} $
-💰 New balance: ${newBalance} $`
-    );
+    // === SEND CASINO STYLE OUTPUT ===
+    const msg = `${result.text}
+🎰 You bet: ${betAmount}$
+💸 You won: ${reward}$
+💰 New balance: ${balance}$`;
+
+    api.sendMessage(msg, threadID, messageID);
   }
 };
