@@ -1,142 +1,126 @@
-const axios = require("axios");
+const ax = require("axios");
+const Database = require("better-sqlite3");
+const path = require("path");
 
-// 🔹 SAME API as slot.js
-const API_URL = "https://balance-bot-api.onrender.com";
+const db = new Database(path.join(__dirname, "balance.db"));
 
-// 🔹 Get balance
-async function getBalance(userID) {
-  try {
-    const res = await axios.get(`${API_URL}/api/balance/${userID}`);
-    return res.data.balance || 100;
-  } catch {
-    return 100;
-  }
+// balance table
+db.prepare(`
+CREATE TABLE IF NOT EXISTS balances (
+  userID TEXT PRIMARY KEY,
+  balance INTEGER
+)`).run();
+
+function getBalance(userID) {
+  const row = db.prepare("SELECT balance FROM balances WHERE userID=?").get(userID);
+  return row ? row.balance : 100;
 }
 
-// 🔹 Add balance
-async function winGame(userID, amount) {
-  try {
-    const res = await axios.post(`${API_URL}/api/balance/win`, { userID, amount });
-    return res.data.success ? res.data.balance : null;
-  } catch {
-    return null;
-  }
+function setBalance(userID, balance) {
+  db.prepare(`
+  INSERT INTO balances (userID, balance)
+  VALUES (?, ?)
+  ON CONFLICT(userID) DO UPDATE SET balance=excluded.balance
+  `).run(userID, balance);
 }
 
-// 🔹 Lose balance
-async function loseGame(userID, amount) {
-  try {
-    const res = await axios.post(`${API_URL}/api/balance/lose`, { userID, amount });
-    return res.data.success ? res.data.balance : null;
-  } catch {
-    return null;
-  }
-}
-
-// 🔹 Format balance
 function formatBalance(num) {
-  return num.toLocaleString("en-US") + " $";
+  if (num >= 1e6) return (num / 1e6).toFixed(2) + "M$";
+  if (num >= 1e3) return (num / 1e3).toFixed(2) + "k$";
+  return num + "$";
 }
 
 module.exports = {
   config: {
     name: "quiz",
-    version: "1.1",
-    author: "Mᴏʜᴀᴍᴍᴀᴅ Aᴋᴀsʜ",
+    aliases: ["qz"],
+    version: "2.0",
+    author: "MOHAMMAD AKASH",
     role: 0,
-    category: "game",
-    shortDescription: "Quiz Game (Reply Based)"
+    category: "economy",
+    guide: "{p}quiz <bn/en>"
   },
 
-  onStart: async function ({ api, event }) {
-    const { threadID, senderID, messageID } = event;
-
-    const balance = await getBalance(senderID);
-    if (balance < 50) {
-      return api.sendMessage(
-        `❌ Insufficient Balance!\n💳 Balance: ${formatBalance(balance)}`,
-        threadID,
-        messageID // ✅ reply to command
-      );
-    }
+  onStart: async function ({ api, event, usersData, args }) {
+    const category =
+      args[0]?.toLowerCase() === "bn" ? "bangla" :
+      args[0]?.toLowerCase() === "en" ? "english" :
+      Math.random() < 0.5 ? "bangla" : "english";
 
     try {
-      // ✅ FREE QUIZ API (English)
-      const res = await axios.get("https://opentdb.com/api.php?amount=1&type=multiple");
-      const q = res.data.results[0];
+      const r = await ax.get(`https://nix-quizz.vercel.app/quiz?category=${category}&q=random`);
+      const q = r.data.question;
+      const { question, correctAnswer, options } = q;
 
-      const options = [...q.incorrect_answers, q.correct_answer]
-        .sort(() => Math.random() - 0.5);
+      const msg = `
+╭──✦ ${question}
+├‣ 𝐀• ${options.a}
+├‣ 𝐁• ${options.b}
+├‣ 𝐂• ${options.c}
+├‣ 𝐃• ${options.d}
+╰──────────────‣
+Reply: A / B / C / D`;
 
-      const answerMap = ["A", "B", "C", "D"];
-      const correctIndex = options.indexOf(q.correct_answer);
-      const correctAnswer = answerMap[correctIndex];
+      api.sendMessage(msg, event.threadID, (e, info) => {
+        global.GoatBot.onReply.set(info.messageID, {
+          commandName: "quiz",
+          author: event.senderID,
+          correctAnswer,
+          attempts: 0
+        });
+      }, event.messageID);
 
-      const quizMsg =
-`✦ Qᴜɪᴢ Gᴀᴍᴇ ✦
-
-${q.question}
-
-🇦 ${options[0]}
-🇧 ${options[1]}
-🇨 ${options[2]}
-🇩 ${options[3]}
-
-✍️ Reply: A / B / C / D`;
-
-      api.sendMessage(
-        quizMsg,
-        threadID,
-        (err, info) => {
-          if (err) return;
-
-          global.GoatBot.onReply.set(info.messageID, {
-            commandName: "quiz",
-            author: senderID,
-            correctAnswer,
-            messageID: info.messageID
-          });
-
-          // ⏳ Auto delete after 30s if no reply
-          setTimeout(() => {
-            global.GoatBot.onReply.delete(info.messageID);
-            api.unsendMessage(info.messageID).catch(() => {});
-          }, 30000);
-        },
-        messageID // ✅ reply to command
-      );
-
-    } catch {
-      api.sendMessage(
-        "❌ Failed to load quiz. Try again.",
-        threadID,
-        messageID // ✅ reply to command
-      );
+    } catch (e) {
+      api.sendMessage("❌ Failed to fetch quiz.", event.threadID);
     }
   },
 
-  onReply: async function ({ api, event, Reply }) {
-    const { senderID, body, threadID } = event;
-    if (senderID !== Reply.author) return;
+  onReply: async ({ api, event, Reply, usersData }) => {
+    if (!Reply || event.senderID !== Reply.author) return;
 
-    const userAns = body.trim().toUpperCase();
-    if (!["A", "B", "C", "D"].includes(userAns)) return;
+    const max = 2;
+    const answer = event.body.toLowerCase();
 
-    await api.unsendMessage(Reply.messageID);
-    global.GoatBot.onReply.delete(Reply.messageID);
-
-    if (userAns === Reply.correctAnswer) {
-      const newBal = await winGame(senderID, 300);
+    if (Reply.attempts >= max) {
+      await api.unsendMessage(event.messageReply.messageID).catch(() => {});
       return api.sendMessage(
-        `✅ Correct Answer!\n🎉 You earned 300 $\n💳 New Balance: ${formatBalance(newBal)}`,
-        threadID
-      );
-    } else {
-      const newBal = await loseGame(senderID, 50);
-      return api.sendMessage(
-        `❌ Wrong Answer!\n−50 $\n💳 Balance: ${formatBalance(newBal)}`,
-        threadID
+        `❌ 𝐌ᴀx 𝐀ᴛᴛᴇᴍᴘᴛs 𝐑ᴇᴀᴄʜᴇᴅ.\n✅ Correct answer: ${Reply.correctAnswer}`,
+        event.threadID
       );
     }
+
+    if (answer === Reply.correctAnswer.toLowerCase()) {
+      const reward = 500;
+      let bal = getBalance(event.senderID);
+      bal += reward;
+      setBalance(event.senderID, bal);
+
+      const name = await usersData.getName(event.senderID);
+
+      const body =
+`🎉 𝐂ᴏʀʀᴇᴄᴛ 𝐀ɴsᴡᴇʀ!
+👤 ${name}
+💰 𝐑ᴇᴡᴀʀᴅ: +${reward}$
+🏦 𝐍ᴇᴡ 𝐁ᴀʟᴀɴᴄᴇ: ${formatBalance(bal)}`;
+
+      const index = body.indexOf(name);
+
+      return api.sendMessage({
+        body,
+        mentions: [{
+          id: event.senderID,
+          tag: name,
+          fromIndex: index
+        }]
+      }, event.threadID);
+    }
+
+    Reply.attempts++;
+    global.GoatBot.onReply.set(event.messageReply.messageID, Reply);
+
+    api.sendMessage(
+      `❌ 𝐖ʀᴏɴɢ 𝐀ɴsᴡᴇʀ\n𝐀ᴛᴛᴇᴍᴘᴛs 𝐋ᴇғᴛ: ${max - Reply.attempts}`,
+      event.threadID
+    );
   }
 };
